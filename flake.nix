@@ -32,7 +32,7 @@
     in {
       toolchain = toolchain;
       devShell = pkgs.mkShell {
-        name = "Operating Systems";
+        name = "OS";
         buildInputs = [
           toolchain
           pkgs.cargo-bootimage
