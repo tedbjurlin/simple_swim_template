@@ -25,8 +25,8 @@ fn cpu_loop() -> ! {
         if let Ok(_) = TICKED.compare_exchange(true, false) {
             kernel.tick();
         }
-        
-        if let Ok(k) = LAST_KEY.fetch_update(|k| if k.is_some() {Some(None)} else {None}) {
+
+        if let Ok(k) = LAST_KEY.fetch_update(|k| if k.is_some() { Some(None) } else { None }) {
             if let Some(k) = k {
                 kernel.key(k);
             }

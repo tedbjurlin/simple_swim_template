@@ -1,13 +1,7 @@
 use pluggable_interrupt_os::vga_buffer::{is_drawable, plot, Color, ColorCode};
 
-
-
-const LINE_WIDTH: usize = 38;
-const DOCUMENT_LENGTH: usize = 40;
-
-
 #[derive(Copy, Clone, Eq, PartialEq)]
-pub struct TextEditor {
+pub struct TextEditor<const LINE_WIDTH: usize, const DOCUMENT_LENGTH: usize> {
     document: [[char; LINE_WIDTH]; DOCUMENT_LENGTH],
     cursor_col: usize,
     cursor_row: usize,
@@ -19,7 +13,9 @@ pub struct TextEditor {
     pub focused: bool,
 }
 
-impl Default for TextEditor {
+impl<const LINE_WIDTH: usize, const DOCUMENT_LENGTH: usize> Default
+    for TextEditor<LINE_WIDTH, DOCUMENT_LENGTH>
+{
     fn default() -> Self {
         Self {
             window_size_x: LINE_WIDTH,
@@ -35,7 +31,9 @@ impl Default for TextEditor {
     }
 }
 
-impl TextEditor {
+impl<const LINE_WIDTH: usize, const DOCUMENT_LENGTH: usize>
+    TextEditor<LINE_WIDTH, DOCUMENT_LENGTH>
+{
     pub fn new(window_width: usize, window_height: usize, focused: bool) -> Self {
         Self {
             window_size_x: window_width,
@@ -51,7 +49,7 @@ impl TextEditor {
     }
 
     pub fn push_char(&mut self, c: char) {
-        self.document[self.cursor_row][self.cursor_col]  = c;
+        self.document[self.cursor_row][self.cursor_col] = c;
         if self.cursor_col < self.window_size_x - 1 {
             self.cursor_col += 1;
         } else if self.cursor_row < self.window_size_y * 4 - 1 {
@@ -71,7 +69,7 @@ impl TextEditor {
             }
             if self.document[self.cursor_row][self.cursor_col] == 0u8 as char {
                 for i in 0..self.window_size_x {
-                    if self.document[self.cursor_row][i] == 0u8 as char{
+                    if self.document[self.cursor_row][i] == 0u8 as char {
                         self.cursor_col = i;
                         break;
                     }
@@ -92,7 +90,7 @@ impl TextEditor {
     }
 
     pub fn shift(&mut self) {
-        for i in  self.cursor_col..self.window_size_x {
+        for i in self.cursor_col..self.window_size_x {
             if self.document[self.cursor_row][i] == 0u8 as char {
                 break;
             } else {
@@ -109,7 +107,7 @@ impl TextEditor {
         if self.cursor_row + 1 != self.window_size_y * 4 {
             self.cursor_row += 1;
             self.cursor_col = 0;
-            for i in  self.window_size_y * 4..self.cursor_row {
+            for i in self.window_size_y * 4..self.cursor_row {
                 self.document[i] = self.document[i - 1];
             }
             self.document[self.cursor_row] = [0u8 as char; LINE_WIDTH];
@@ -131,7 +129,7 @@ impl TextEditor {
             }
             if self.document[self.cursor_row][self.cursor_col] == 0u8 as char {
                 for i in 0..self.window_size_x {
-                    if self.document[self.cursor_row][i] == 0u8 as char{
+                    if self.document[self.cursor_row][i] == 0u8 as char {
                         self.cursor_col = i;
                         break;
                     }
@@ -148,7 +146,7 @@ impl TextEditor {
             }
             if self.document[self.cursor_row][self.cursor_col] == 0u8 as char {
                 for i in 0..self.window_size_x {
-                    if self.document[self.cursor_row][i] == 0u8 as char{
+                    if self.document[self.cursor_row][i] == 0u8 as char {
                         self.cursor_col = i;
                         break;
                     }
@@ -165,7 +163,7 @@ impl TextEditor {
             self.cursor_row -= 1;
             if self.document[self.cursor_row][self.cursor_col] == 0u8 as char {
                 for i in 0..self.window_size_x {
-                    if self.document[self.cursor_row][i] == 0u8 as char{
+                    if self.document[self.cursor_row][i] == 0u8 as char {
                         self.cursor_col = i;
                         break;
                     }
@@ -176,7 +174,9 @@ impl TextEditor {
     }
 
     pub fn move_cursor_right(&mut self) {
-        if self.cursor_col < self.window_size_x - 1 && self.document[self.cursor_row][self.cursor_col] != 0u8 as char {
+        if self.cursor_col < self.window_size_x - 1
+            && self.document[self.cursor_row][self.cursor_col] != 0u8 as char
+        {
             self.cursor_col += 1;
         } else if self.cursor_row < self.window_size_y * 4 - 1 {
             self.cursor_col = 0;
@@ -188,21 +188,43 @@ impl TextEditor {
     pub fn draw_window(&mut self, window_x: usize, window_y: usize) {
         if self.cursor_row < self.focus_y && self.focus_y != 0 {
             self.focus_y = self.cursor_row;
-        } else if self.cursor_row >= self.focus_y + self.window_size_y && self.focus_y + self.window_size_y < self.window_size_y * 4 {
+        } else if self.cursor_row >= self.focus_y + self.window_size_y
+            && self.focus_y + self.window_size_y < self.window_size_y * 4
+        {
             self.focus_y = self.cursor_row - self.window_size_y + 1;
         }
         for y in 0..self.window_size_y {
             for x in 0..self.window_size_x {
                 if self.cursor_col == x && self.cursor_row == y + self.focus_y && self.focused {
                     if is_drawable(self.document[y + self.focus_y][x]) {
-                        plot(self.document[y + self.focus_y][x], window_x + x + 1, window_y + y + 1, ColorCode::new(Color::Black, Color::LightCyan));
+                        plot(
+                            self.document[y + self.focus_y][x],
+                            window_x + x + 1,
+                            window_y + y + 1,
+                            ColorCode::new(Color::Black, Color::LightCyan),
+                        );
                     } else {
-                        plot(' ', window_x + x + 1, window_y + y + 1, ColorCode::new(Color::Black, Color::LightCyan));
+                        plot(
+                            ' ',
+                            window_x + x + 1,
+                            window_y + y + 1,
+                            ColorCode::new(Color::Black, Color::LightCyan),
+                        );
                     }
                 } else if is_drawable(self.document[y + self.focus_y][x]) {
-                    plot(self.document[y + self.focus_y][x], window_x + x + 1, window_y + y + 1, ColorCode::new(Color::LightCyan, Color::Black));
+                    plot(
+                        self.document[y + self.focus_y][x],
+                        window_x + x + 1,
+                        window_y + y + 1,
+                        ColorCode::new(Color::LightCyan, Color::Black),
+                    );
                 } else {
-                    plot(' ', window_x + x + 1, window_y + y + 1, ColorCode::new(Color::LightCyan, Color::Black));
+                    plot(
+                        ' ',
+                        window_x + x + 1,
+                        window_y + y + 1,
+                        ColorCode::new(Color::LightCyan, Color::Black),
+                    );
                 }
             }
         }
