@@ -2,11 +2,12 @@
 
 use buffer::TextEditor;
 use file_system_solution::FileSystem;
+use gc_heap_template::{CopyingHeap, OnceAndDoneHeap};
 use num::Integer;
 use pc_keyboard::{DecodedKey, KeyCode};
-use pluggable_interrupt_os::vga_buffer::{is_drawable, plot, Color, ColorCode};
+use pluggable_interrupt_os::{println, vga_buffer::{is_drawable, plot, Color, ColorCode}};
 use ramdisk::RamDisk;
-use simple_interp::Interpreter;
+use simple_interp::{Interpreter, InterpreterOutput};
 
 use core::prelude::rust_2024::derive;
 
@@ -23,7 +24,14 @@ const MAX_FILE_BLOCKS: usize = 64;
 const MAX_FILE_BYTES: usize = MAX_FILE_BLOCKS * BLOCK_SIZE;
 const MAX_FILES_STORED: usize = 30;
 const MAX_FILENAME_BYTES: usize = 10;
-const DOCUMENT_LENGTH: usize = 40;
+const DOCUMENT_LENGTH: usize = 40;const MAX_TOKENS: usize = 500;
+const MAX_LITERAL_CHARS: usize = 30;
+const STACK_DEPTH: usize = 50;
+const MAX_LOCAL_VARS: usize = 20;
+const HEAP_SIZE: usize = 1024;
+const MAX_HEAP_BLOCKS: usize = HEAP_SIZE;
+
+
 
 pub struct SwimInterface {
     windows: [Window; 4],
@@ -137,6 +145,30 @@ pub fn sub1<const LIMIT: usize>(value: usize) -> usize {
 impl SwimInterface {
     pub fn tick(&mut self) {
         self.draw_current();
+        // let mut program_to_tick = 4;
+        // let mut min_ratio = f64::MAX;
+        // for i in 0..4 {
+        //     if self.windows[i].state == WindowState::Running {
+        //         if let Some(interpreter) = &self.windows[i].interpreter {
+        //             if !interpreter.blocked_on_input() && !interpreter.completed() {
+        //                 let ratio = self.windows[i].steps_executed as f64 / self.windows[i].active_ticks as f64;
+        //                 if ratio < min_ratio {
+        //                     min_ratio = ratio;
+        //                     program_to_tick = i;
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
+        // if program_to_tick != 4 {
+        //     if let Some(mut interpreter) = self.windows[program_to_tick].interpreter {
+        //         match interpreter.tick(&mut self.windows[program_to_tick]) {
+        //             simple_interp::TickStatus::Continuing => todo!(),
+        //             simple_interp::TickStatus::Finished => todo!(),
+        //             simple_interp::TickStatus::AwaitInput => todo!(),
+        //         }
+        //     }
+        // }
     }
 
     fn draw_current(&mut self) {
@@ -379,7 +411,7 @@ impl SwimInterface {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Eq, PartialEq)]
 enum WindowState {
     Editing,
     Running,
@@ -387,15 +419,31 @@ enum WindowState {
     Listing,
 }
 
-#[derive(Default)]
 struct Window {
     editor: Option<TextEditor<WIN_WIDTH, DOCUMENT_LENGTH>>,
-    //interpreter: Option<Interpreter<>>
+    interpreter: Option<Interpreter<MAX_TOKENS, MAX_LITERAL_CHARS, STACK_DEPTH, MAX_LOCAL_VARS, WIN_WIDTH, CopyingHeap<HEAP_SIZE, MAX_HEAP_BLOCKS>>>,
     state: WindowState,
     window_x: usize,
     window_y: usize,
     focused: bool,
     focused_file: usize,
+    active_ticks: usize,
+    steps_executed: usize,
+}
+
+impl Default for Window {
+    fn default() -> Self {
+        Self {
+            editor: None,
+            interpreter: None,
+            state: Default::default(),
+            window_x: Default::default(),
+            window_y: Default::default(),
+            focused: Default::default(),
+            focused_file: Default::default(),
+            active_ticks: Default::default(),
+            steps_executed: Default::default() }
+    }
 }
 
 impl Window {
@@ -452,5 +500,17 @@ impl Window {
             editor.focused = focused;
             self.editor = Some(editor);
         }
+    }
+
+    pub fn run_program(&mut self, program: &str) {
+        self.state = WindowState::Running;
+        //let interpreter = Interpreter::new(program);    
+        //self.interpreter = Some(interpreter);
+    }
+}
+
+impl InterpreterOutput for Window {
+    fn print(&mut self, chars: &[u8]) {
+        todo!()
     }
 }
