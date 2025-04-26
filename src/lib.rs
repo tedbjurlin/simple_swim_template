@@ -1,11 +1,16 @@
 #![no_std]
 
 use buffer::TextEditor;
-use file_system_solution::FileSystem;
-use gc_heap_template::{CopyingHeap, OnceAndDoneHeap};
+use file_system_solution::{FileSystem, FileSystemError};
+use gc_heap_template::{CopyingHeap, GenerationalHeap, OnceAndDoneHeap};
 use num::Integer;
 use pc_keyboard::{DecodedKey, KeyCode};
-use pluggable_interrupt_os::{println, vga_buffer::{is_drawable, plot, Color, ColorCode}};
+use pluggable_interrupt_os::{
+    print, println,
+    vga_buffer::{
+        is_drawable, peek, plot, plot_num, plot_num_right_justified, plot_str, Color, ColorCode,
+    },
+};
 use ramdisk::RamDisk;
 use simple_interp::{Interpreter, InterpreterOutput};
 
@@ -14,7 +19,12 @@ use core::prelude::rust_2024::derive;
 mod buffer;
 
 const WIN_WIDTH: usize = (WIN_REGION_WIDTH - 4) / 2;
-const EDITOR_POSITION: [(usize, usize); 4] = [(0, 1), (WIN_REGION_WIDTH / 2, 1), (0, 13), (WIN_REGION_WIDTH / 2, 13)];
+const EDITOR_POSITION: [(usize, usize); 4] = [
+    (0, 1),
+    (WIN_REGION_WIDTH / 2, 1),
+    (0, 13),
+    (WIN_REGION_WIDTH / 2, 13),
+];
 const TASK_MANAGER_WIDTH: usize = 10;
 const WIN_REGION_WIDTH: usize = 80 - TASK_MANAGER_WIDTH;
 const MAX_OPEN: usize = 16;
@@ -24,14 +34,14 @@ const MAX_FILE_BLOCKS: usize = 64;
 const MAX_FILE_BYTES: usize = MAX_FILE_BLOCKS * BLOCK_SIZE;
 const MAX_FILES_STORED: usize = 30;
 const MAX_FILENAME_BYTES: usize = 10;
-const DOCUMENT_LENGTH: usize = 40;const MAX_TOKENS: usize = 500;
+const DOCUMENT_LENGTH: usize = 40;
+const MAX_TOKENS: usize = 500;
 const MAX_LITERAL_CHARS: usize = 30;
 const STACK_DEPTH: usize = 50;
 const MAX_LOCAL_VARS: usize = 20;
 const HEAP_SIZE: usize = 1024;
 const MAX_HEAP_BLOCKS: usize = HEAP_SIZE;
-
-
+const SCHED_LATENCY: usize = 48;
 
 pub struct SwimInterface {
     windows: [Window; 4],
@@ -46,6 +56,8 @@ pub struct SwimInterface {
     >,
     focused_editor: usize,
     num_files: usize,
+    running_countdown: usize,
+    current_process: usize,
 }
 
 impl Default for SwimInterface {
@@ -92,20 +104,19 @@ print((4 * sum))
             "#,
             &mut filesystem,
         );
-        let mut windows = [
-            Window::default(),
-            Window::default(),
-            Window::default(),
-            Window::default(),
+        let windows = [
+            Window::make(EDITOR_POSITION[0].0, EDITOR_POSITION[0].1),
+            Window::make(EDITOR_POSITION[1].0, EDITOR_POSITION[1].1),
+            Window::make(EDITOR_POSITION[2].0, EDITOR_POSITION[2].1),
+            Window::make(EDITOR_POSITION[3].0, EDITOR_POSITION[3].1),
         ];
-        for i in 0..4 {
-            windows[i].set_position(EDITOR_POSITION[i].0, EDITOR_POSITION[i].1);
-        }
         Self {
             windows,
             filesystem,
             focused_editor: 0,
             num_files: 4,
+            running_countdown: 0,
+            current_process: 0,
         }
     }
 }
@@ -145,30 +156,48 @@ pub fn sub1<const LIMIT: usize>(value: usize) -> usize {
 impl SwimInterface {
     pub fn tick(&mut self) {
         self.draw_current();
-        // let mut program_to_tick = 4;
-        // let mut min_ratio = f64::MAX;
-        // for i in 0..4 {
-        //     if self.windows[i].state == WindowState::Running {
-        //         if let Some(interpreter) = &self.windows[i].interpreter {
-        //             if !interpreter.blocked_on_input() && !interpreter.completed() {
-        //                 let ratio = self.windows[i].steps_executed as f64 / self.windows[i].active_ticks as f64;
-        //                 if ratio < min_ratio {
-        //                     min_ratio = ratio;
-        //                     program_to_tick = i;
-        //                 }
-        //             }
-        //         }
-        //     }
-        // }
-        // if program_to_tick != 4 {
-        //     if let Some(mut interpreter) = self.windows[program_to_tick].interpreter {
-        //         match interpreter.tick(&mut self.windows[program_to_tick]) {
-        //             simple_interp::TickStatus::Continuing => todo!(),
-        //             simple_interp::TickStatus::Finished => todo!(),
-        //             simple_interp::TickStatus::AwaitInput => todo!(),
-        //         }
-        //     }
-        // }
+        let mut program_to_tick = 4;
+        if self.running_countdown > 0 {
+            if self.windows[self.current_process].state == WindowState::Running {
+                if let Some(interpreter) = &self.windows[self.current_process].interpreter {
+                    if !interpreter.blocked_on_input() && !interpreter.completed() {
+                        program_to_tick = self.current_process;
+                    }
+                }
+            }
+            self.running_countdown -= 1;
+        } else {
+            let mut min_vruntime = usize::MAX;
+            let mut program_count = 0;
+            for i in 0..4 {
+                if self.windows[i].state == WindowState::Running {
+                    if let Some(interpreter) = &self.windows[i].interpreter {
+                        if !interpreter.blocked_on_input() && !interpreter.completed() {
+                            if self.windows[i].vruntime < min_vruntime {
+                                min_vruntime = self.windows[i].vruntime;
+                                program_to_tick = i;
+                            }
+                            program_count += 1;
+                        }
+                    }
+                }
+            }
+            if program_to_tick != 4 {
+                self.current_process = program_to_tick;
+                self.running_countdown = SCHED_LATENCY / program_count;
+            }
+        }
+        if program_to_tick != 4 {
+            if let Some(mut interpreter) = self.windows[program_to_tick].interpreter {
+                //print!("{}", interpreter.completed);
+                match interpreter.tick(&mut self.windows[program_to_tick]) {
+                    simple_interp::TickStatus::Continuing => (),
+                    simple_interp::TickStatus::Finished => self.windows[self.focused_editor].print("completed".as_bytes()),
+                    simple_interp::TickStatus::AwaitInput => (),
+                }
+                self.windows[program_to_tick].vruntime += 1;
+            }
+        }
     }
 
     fn draw_current(&mut self) {
@@ -196,6 +225,7 @@ impl SwimInterface {
             );
             self.windows[i].draw_window(&mut self.filesystem);
         }
+        self.draw_processes();
     }
 
     fn draw_outline(&self, x: usize, y: usize, focused: bool) {
@@ -336,6 +366,31 @@ impl SwimInterface {
         }
     }
 
+    pub fn draw_processes(&mut self) {
+        for i in 0..4 {
+            plot(
+                'F',
+                WIN_REGION_WIDTH,
+                i * 2,
+                ColorCode::new(Color::LightCyan, Color::Black),
+            );
+            plot(
+                (i + 49) as u8 as char,
+                WIN_REGION_WIDTH + 1,
+                i * 2,
+                ColorCode::new(Color::LightCyan, Color::Black),
+            );
+
+            plot_num_right_justified(
+                10,
+                self.windows[i].vruntime as isize,
+                WIN_REGION_WIDTH,
+                i * 2 + 1,
+                ColorCode::new(Color::LightCyan, Color::Black),
+            );
+        }
+    }
+
     pub fn key(&mut self, key: DecodedKey) {
         match key {
             DecodedKey::RawKey(code) => self.handle_raw(code),
@@ -371,10 +426,12 @@ impl SwimInterface {
             KeyCode::ArrowRight => {
                 match self.windows[self.focused_editor].state {
                     WindowState::Editing => todo!(),
-                    WindowState::Running => todo!(),
+                    WindowState::Running => (),
                     WindowState::Listing => {
-                        self.windows[self.focused_editor].focused_file = (self.windows[self.focused_editor].focused_file + 1).mod_floor(&self.num_files);
-                    },
+                        self.windows[self.focused_editor].focused_file =
+                            (self.windows[self.focused_editor].focused_file + 1)
+                                .mod_floor(&self.num_files);
+                    }
                 }
                 //self.windows[self.focused_editor].move_cursor_right();
             }
@@ -384,12 +441,15 @@ impl SwimInterface {
             KeyCode::ArrowLeft => {
                 match self.windows[self.focused_editor].state {
                     WindowState::Editing => todo!(),
-                    WindowState::Running => todo!(),
+                    WindowState::Running => (),
                     WindowState::Listing => {
                         if self.num_files > 0 {
-                            self.windows[self.focused_editor].focused_file = (self.windows[self.focused_editor].focused_file + self.num_files - 1).mod_floor(&self.num_files);
+                            self.windows[self.focused_editor].focused_file =
+                                (self.windows[self.focused_editor].focused_file + self.num_files
+                                    - 1)
+                                .mod_floor(&self.num_files);
                         }
-                    },
+                    }
                 }
                 //self.windows[self.focused_editor].move_cursor_left();
             }
@@ -398,6 +458,35 @@ impl SwimInterface {
     }
 
     fn handle_unicode(&mut self, key: char) {
+        match self.windows[self.focused_editor].state {
+            WindowState::Editing => todo!(),
+            WindowState::Running => todo!(),
+            WindowState::Listing => match key {
+                'r' => {
+                    for col in self.windows[self.focused_editor].window_x + 1..self.windows[self.focused_editor].window_x + WIN_WIDTH - 1 {
+                        for row in self.windows[self.focused_editor].window_y + 1..self.windows[self.focused_editor].window_y + 9 {
+                            plot(' ', col, row, ColorCode::new(Color::Black, Color::Black));
+                        }
+                    }
+                    self.windows[self.focused_editor].state = WindowState::Running;
+                    let mut filesystem_operations = || -> Result<(), FileSystemError> {
+                        let (_, files) = self.filesystem.list_directory()?;
+                        let filename = files[self.windows[self.focused_editor].focused_file];
+                        let fd = self.filesystem.open_read(core::str::from_utf8(&filename).unwrap())?;
+                        let mut buffer = [0; MAX_FILE_BYTES];
+                        let num_bytes = self.filesystem.read(fd, &mut buffer)?;
+                        let program = core::str::from_utf8(&buffer[0..num_bytes]).unwrap();
+                        self.windows[self.focused_editor].run_program(program);
+                        self.filesystem.close(fd)?;
+                        Ok(())
+                    };
+                    if let Err(_e) = filesystem_operations() {
+                        self.windows[self.focused_editor].print("filesystem error".as_bytes());
+                    }
+                }
+                _ => (),
+            },
+        }
         // match key {
         //     '\n' => self.windows[self.focused_editor].newline(),
         //     '\u{0008}' => self.windows[self.focused_editor].backspace_char(),
@@ -421,14 +510,23 @@ enum WindowState {
 
 struct Window {
     editor: Option<TextEditor<WIN_WIDTH, DOCUMENT_LENGTH>>,
-    interpreter: Option<Interpreter<MAX_TOKENS, MAX_LITERAL_CHARS, STACK_DEPTH, MAX_LOCAL_VARS, WIN_WIDTH, CopyingHeap<HEAP_SIZE, MAX_HEAP_BLOCKS>>>,
+    interpreter: Option<
+        Interpreter<
+            MAX_TOKENS,
+            MAX_LITERAL_CHARS,
+            STACK_DEPTH,
+            MAX_LOCAL_VARS,
+            WIN_WIDTH,
+            CopyingHeap<HEAP_SIZE, MAX_HEAP_BLOCKS>,
+        >,
+    >,
+    interpreter_print_loc: usize,
     state: WindowState,
     window_x: usize,
     window_y: usize,
     focused: bool,
     focused_file: usize,
-    active_ticks: usize,
-    steps_executed: usize,
+    vruntime: usize,
 }
 
 impl Default for Window {
@@ -436,20 +534,30 @@ impl Default for Window {
         Self {
             editor: None,
             interpreter: None,
+            interpreter_print_loc: Default::default(),
             state: Default::default(),
             window_x: Default::default(),
             window_y: Default::default(),
             focused: Default::default(),
             focused_file: Default::default(),
-            active_ticks: Default::default(),
-            steps_executed: Default::default() }
+            vruntime: Default::default(),
+        }
     }
 }
 
 impl Window {
-    pub fn set_position(&mut self, x: usize, y: usize) {
-        self.window_x = x;
-        self.window_y = y;
+    pub fn make(x: usize, y: usize) -> Self {
+        Self {
+            editor: None,
+            interpreter: None,
+            interpreter_print_loc: Default::default(),
+            state: Default::default(),
+            window_x: x,
+            window_y: y,
+            focused: Default::default(),
+            focused_file: Default::default(),
+            vruntime: Default::default(),
+        }
     }
 
     pub fn draw_window(
@@ -466,7 +574,7 @@ impl Window {
     ) {
         match self.state {
             WindowState::Editing => todo!(),
-            WindowState::Running => todo!(),
+            WindowState::Running => (),
             WindowState::Listing => match filesystem.list_directory() {
                 Ok((num_files, files)) => {
                     for i in 0..num_files {
@@ -489,7 +597,9 @@ impl Window {
                         }
                     }
                 }
-                Err(e) => todo!(),
+                Err(e) => {
+                    todo!()
+                }
             },
         }
     }
@@ -503,14 +613,49 @@ impl Window {
     }
 
     pub fn run_program(&mut self, program: &str) {
-        self.state = WindowState::Running;
-        //let interpreter = Interpreter::new(program);    
-        //self.interpreter = Some(interpreter);
+        let interpreter = Interpreter::new(program);
+        self.interpreter = Some(interpreter);
     }
 }
 
 impl InterpreterOutput for Window {
     fn print(&mut self, chars: &[u8]) {
-        todo!()
+        // if let Some(mut buffer) =
+        // for i in 0..chars.len() {
+        //     i / WIN_WIDTH;
+        //     i % WIN_WIDTH;
+        //     if let Some(buffer) = self.interpreter_buffer {
+        //         buffer[self.interpreter_print_loc + i / WIN_WIDTH] = chars[i];
+        //     }
+        // }
+        for row in self.window_y + 1..self.interpreter_print_loc + self.window_y + 1 {
+            for col in self.window_x + 1..WIN_WIDTH + self.window_x - 1 {
+                let (c, color) = peek(col, row);
+                plot(c, col, row, color);
+            }
+        }
+        if chars.len() > WIN_WIDTH - 2 {
+            for i in 0..WIN_WIDTH - 2 {
+                plot(
+                    chars[i] as char,
+                    i + self.window_x + 1,
+                    self.interpreter_print_loc + self.window_y + 1,
+                    ColorCode::new(Color::LightCyan, Color::Black),
+                );
+            }
+            self.print(&chars[WIN_WIDTH - 2..]);
+        } else {
+            for i in 0..chars.len() {
+                plot(
+                    chars[i] as char,
+                    i + self.window_x + 1,
+                    self.interpreter_print_loc + self.window_y + 1,
+                    ColorCode::new(Color::LightCyan, Color::Black),
+                );
+            }
+        }
+        if self.interpreter_print_loc <= 8 {
+            self.interpreter_print_loc += 1;
+        }
     }
 }
