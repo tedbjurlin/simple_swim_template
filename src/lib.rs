@@ -1,6 +1,7 @@
 #![no_std]
 
 use buffer::TextEditor;
+use core::{fmt::Write, usize};
 use file_system_solution::{FileSystem, FileSystemError};
 use gc_heap_template::{CopyingHeap, GenerationalHeap, OnceAndDoneHeap};
 use num::Integer;
@@ -12,7 +13,7 @@ use pluggable_interrupt_os::{
     },
 };
 use ramdisk::RamDisk;
-use simple_interp::{Interpreter, InterpreterOutput};
+use simple_interp::{ArrayString, Interpreter, InterpreterOutput};
 
 use core::prelude::rust_2024::derive;
 
@@ -35,13 +36,13 @@ const MAX_FILE_BYTES: usize = MAX_FILE_BLOCKS * BLOCK_SIZE;
 const MAX_FILES_STORED: usize = 30;
 const MAX_FILENAME_BYTES: usize = 10;
 const DOCUMENT_LENGTH: usize = 40;
-const MAX_TOKENS: usize = 500;
-const MAX_LITERAL_CHARS: usize = 30;
-const STACK_DEPTH: usize = 50;
-const MAX_LOCAL_VARS: usize = 20;
-const HEAP_SIZE: usize = 1024;
+const MAX_TOKENS: usize = 100;
+const MAX_LITERAL_CHARS: usize = 15;
+const STACK_DEPTH: usize = 20;
+const MAX_LOCAL_VARS: usize = 10;
+const HEAP_SIZE: usize = 256;
 const MAX_HEAP_BLOCKS: usize = HEAP_SIZE;
-const SCHED_LATENCY: usize = 48;
+const SCHED_LATENCY: usize = 24;
 
 pub struct SwimInterface {
     windows: [Window; 4],
@@ -58,13 +59,21 @@ pub struct SwimInterface {
     num_files: usize,
     running_countdown: usize,
     current_process: usize,
+    filename_input: ArrayString<MAX_FILENAME_BYTES>,
+    creating_file: bool,
 }
 
 impl Default for SwimInterface {
     fn default() -> Self {
         let mut filesystem = FileSystem::new(RamDisk::new());
         create_default("hello", r#"print("Hello, world!")"#, &mut filesystem);
-        create_default("nums", r#"print(1)\nprint(257)"#, &mut filesystem);
+        create_default(
+            "nums",
+            r#"print(1)
+print(257)
+            "#,
+            &mut filesystem,
+        );
         create_default(
             "average",
             r#"
@@ -117,6 +126,8 @@ print((4 * sum))
             num_files: 4,
             running_countdown: 0,
             current_process: 0,
+            filename_input: ArrayString::default(),
+            creating_file: false,
         }
     }
 }
@@ -167,21 +178,8 @@ impl SwimInterface {
             }
             self.running_countdown -= 1;
         } else {
-            let mut min_vruntime = usize::MAX;
-            let mut program_count = 0;
-            for i in 0..4 {
-                if self.windows[i].state == WindowState::Running {
-                    if let Some(interpreter) = &self.windows[i].interpreter {
-                        if !interpreter.blocked_on_input() && !interpreter.completed() {
-                            if self.windows[i].vruntime < min_vruntime {
-                                min_vruntime = self.windows[i].vruntime;
-                                program_to_tick = i;
-                            }
-                            program_count += 1;
-                        }
-                    }
-                }
-            }
+            let (_, p, program_count) = self.min_vruntime();
+            program_to_tick = p;
             if program_to_tick != 4 {
                 self.current_process = program_to_tick;
                 self.running_countdown = SCHED_LATENCY / program_count;
@@ -192,18 +190,115 @@ impl SwimInterface {
                 //print!("{}", interpreter.completed);
                 match interpreter.tick(&mut self.windows[program_to_tick]) {
                     simple_interp::TickStatus::Continuing => (),
-                    simple_interp::TickStatus::Finished => self.windows[self.focused_editor].print("completed".as_bytes()),
-                    simple_interp::TickStatus::AwaitInput => (),
+                    simple_interp::TickStatus::Finished => {}
+                    simple_interp::TickStatus::AwaitInput => {
+                        self.windows[program_to_tick].input_buffer = Default::default();
+                        self.windows[program_to_tick].taking_input = true;
+                        if self.windows[program_to_tick].interpreter_print_loc == 10 {
+                            for row in self.windows[program_to_tick].window_y + 1
+                                ..self.windows[program_to_tick].interpreter_print_loc
+                                    + self.windows[program_to_tick].window_y
+                            {
+                                for col in self.windows[program_to_tick].window_x + 1
+                                    ..WIN_WIDTH + self.windows[program_to_tick].window_x
+                                {
+                                    let (c, color) = peek(col, row + 1);
+                                    plot(c, col, row, color);
+                                }
+                            }
+                            for col in self.windows[program_to_tick].window_x + 1
+                                ..WIN_WIDTH + self.windows[program_to_tick].window_x - 1
+                            {
+                                plot(
+                                    ' ',
+                                    col,
+                                    self.windows[program_to_tick].interpreter_print_loc
+                                        + self.windows[program_to_tick].window_y,
+                                    ColorCode::new(Color::Black, Color::Black),
+                                );
+                            }
+                            self.windows[program_to_tick].interpreter_print_loc -= 1;
+                        }
+                    }
                 }
                 self.windows[program_to_tick].vruntime += 1;
+                self.windows[program_to_tick].interpreter = Some(interpreter);
             }
         }
     }
 
+    fn min_vruntime(&mut self) -> (usize, usize, usize) {
+        let mut min_vruntime = usize::MAX;
+        let mut program_to_tick = 4;
+        let mut num_programs = 0;
+        for i in 0..4 {
+            if self.windows[i].state == WindowState::Running {
+                if let Some(interpreter) = &self.windows[i].interpreter {
+                    if !interpreter.blocked_on_input() && !interpreter.completed() {
+                        if self.windows[i].vruntime < min_vruntime {
+                            min_vruntime = self.windows[i].vruntime;
+                            program_to_tick = i;
+                        }
+                        num_programs += 1;
+                    }
+                }
+            }
+        }
+        if min_vruntime == usize::MAX {
+            (0, 4, 0)
+        } else {
+            (min_vruntime, program_to_tick, num_programs)
+        }
+    }
+
     fn draw_current(&mut self) {
-        const HEADER: [char; 6] = ['H', 'e', 'a', 'd', 'e', 'r'];
-        for i in 0..6 {
-            plot(HEADER[i], i, 0, ColorCode::new(Color::Green, Color::Black));
+        match self.windows[self.focused_editor].state {
+            WindowState::Editing => {
+                plot_str(
+                    "Editing ",
+                    0,
+                    0,
+                    ColorCode::new(Color::LightCyan, Color::Black),
+                );
+                plot_str(
+                    core::str::from_utf8(&self.windows[self.focused_editor].current_file).unwrap(),
+                    8,
+                    0,
+                    ColorCode::new(Color::LightCyan, Color::Black),
+                );
+            }
+            WindowState::Running => {
+                if self.windows[self.focused_editor].taking_input {
+                    plot_str(
+                        "Awaiting Input    ",
+                        0,
+                        0,
+                        ColorCode::new(Color::LightCyan, Color::Black),
+                    );
+                } else {
+                    plot_str(
+                        "Running ",
+                        0,
+                        0,
+                        ColorCode::new(Color::LightCyan, Color::Black),
+                    );
+                    plot_str(
+                        core::str::from_utf8(&self.windows[self.focused_editor].current_file)
+                            .unwrap(),
+                        8,
+                        0,
+                        ColorCode::new(Color::LightCyan, Color::Black),
+                    );
+                }
+            }
+            WindowState::Listing => {
+                plot_str(
+                    "F5 - Filename: ",
+                    0,
+                    0,
+                    ColorCode::new(Color::LightCyan, Color::Black),
+                );
+            }
         }
         for i in 0..4 {
             self.draw_outline(
@@ -213,86 +308,110 @@ impl SwimInterface {
             );
             plot(
                 'F',
-                EDITOR_POSITION[i].0 + WIN_REGION_WIDTH / 4 - 1,
+                EDITOR_POSITION[i].0 + 3,
                 EDITOR_POSITION[i].1,
                 ColorCode::new(Color::Green, Color::Black),
             );
-            plot(
-                (i + 49) as u8 as char,
-                EDITOR_POSITION[i].0 + WIN_REGION_WIDTH / 4,
+            plot_num(
+                (i + 1) as isize,
+                EDITOR_POSITION[i].0 + 4,
                 EDITOR_POSITION[i].1,
                 ColorCode::new(Color::Green, Color::Black),
             );
+            if i == self.focused_editor {
+                match self.windows[i].state {
+                    WindowState::Listing => {
+                        plot_str(
+                            " (e)dit (r)unÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍÍ",
+                            EDITOR_POSITION[i].0 + 5,
+                            EDITOR_POSITION[i].1,
+                            ColorCode::new(Color::Green, Color::Black),
+                        );
+                    }
+                    _ => {
+                        for j in 0..10 {
+                            plot(
+                                self.windows[self.focused_editor].current_file[j] as char,
+                                EDITOR_POSITION[i].0 + 6 + j,
+                                EDITOR_POSITION[i].1,
+                                ColorCode::new(Color::Green, Color::Black),
+                            );
+                        }
+                        plot_str(
+                            " (F6 to exit)ÍÍÍÍÍ",
+                            EDITOR_POSITION[i].0 + 16,
+                            EDITOR_POSITION[i].1,
+                            ColorCode::new(Color::Green, Color::Black),
+                        );
+                    }
+                }
+            } else {
+                match self.windows[i].state {
+                    WindowState::Listing => {
+                        plot_str(
+                            " (e)dit (r)unÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄ",
+                            EDITOR_POSITION[i].0 + 5,
+                            EDITOR_POSITION[i].1,
+                            ColorCode::new(Color::Green, Color::Black),
+                        );
+                    }
+                    _ => {
+                        for j in 0..10 {
+                            plot(
+                                self.windows[self.focused_editor].current_file[j] as char,
+                                EDITOR_POSITION[i].0 + 6 + j,
+                                EDITOR_POSITION[i].1,
+                                ColorCode::new(Color::Green, Color::Black),
+                            );
+                        }
+                        plot_str(
+                            " (F6 to exit)ÄÄÄÄÄ",
+                            EDITOR_POSITION[i].0 + 16,
+                            EDITOR_POSITION[i].1,
+                            ColorCode::new(Color::Green, Color::Black),
+                        );
+                    }
+                }
+            }
             self.windows[i].draw_window(&mut self.filesystem);
         }
         self.draw_processes();
     }
 
     fn draw_outline(&self, x: usize, y: usize, focused: bool) {
-        for i in x + 1..x + WIN_REGION_WIDTH / 4 - 1 {
-            for j in [y, y + 11] {
-                if focused {
-                    plot(
-                        205u8 as char,
-                        i,
-                        j,
-                        ColorCode::new(Color::Green, Color::Black),
-                    );
-                } else {
-                    plot(
-                        196u8 as char,
-                        i,
-                        j,
-                        ColorCode::new(Color::Green, Color::Black),
-                    );
-                }
+        for i in x + 1..x + 3 {
+            if focused {
+                plot(
+                    205u8 as char,
+                    i,
+                    y,
+                    ColorCode::new(Color::Green, Color::Black),
+                );
+            } else {
+                plot(
+                    196u8 as char,
+                    i,
+                    y,
+                    ColorCode::new(Color::Green, Color::Black),
+                );
             }
         }
-        for i in x + WIN_REGION_WIDTH / 4 + 1..x + WIN_REGION_WIDTH / 2 - 1 {
-            for j in [y, y + 11] {
-                if focused {
-                    plot(
-                        205u8 as char,
-                        i,
-                        j,
-                        ColorCode::new(Color::Green, Color::Black),
-                    );
-                } else {
-                    plot(
-                        196u8 as char,
-                        i,
-                        j,
-                        ColorCode::new(Color::Green, Color::Black),
-                    );
-                }
+        for i in x + 1..x + WIN_REGION_WIDTH / 2 - 1 {
+            if focused {
+                plot(
+                    205u8 as char,
+                    i,
+                    y + 11,
+                    ColorCode::new(Color::Green, Color::Black),
+                );
+            } else {
+                plot(
+                    196u8 as char,
+                    i,
+                    y + 11,
+                    ColorCode::new(Color::Green, Color::Black),
+                );
             }
-        }
-        if focused {
-            plot(
-                205u8 as char,
-                x + WIN_REGION_WIDTH / 4 - 1,
-                y + 11,
-                ColorCode::new(Color::Green, Color::Black),
-            );
-            plot(
-                205u8 as char,
-                x + WIN_REGION_WIDTH / 4,
-                y + 11,
-                ColorCode::new(Color::Green, Color::Black),
-            );
-        } else {
-            plot(
-                196u8 as char,
-                x + WIN_REGION_WIDTH / 4 - 1,
-                y + 11,
-                ColorCode::new(Color::Green, Color::Black),
-            );
-            plot(
-                196u8 as char,
-                x + WIN_REGION_WIDTH / 4,
-                y + 11,
-                ColorCode::new(Color::Green, Color::Black),
-            );
         }
         for j in y + 1..y + 11 {
             for i in [x, x + WIN_REGION_WIDTH / 2 - 1] {
@@ -420,6 +539,13 @@ impl SwimInterface {
                 self.focused_editor = 3;
                 self.windows[self.focused_editor].set_focus(true);
             }
+            KeyCode::F6 => {
+                self.windows[self.focused_editor].interpreter = None;
+                self.windows[self.focused_editor].interpreter_print_loc = 0;
+                self.windows[self.focused_editor].vruntime = 0;
+                self.windows[self.focused_editor].state = WindowState::Listing;
+                self.windows[self.focused_editor].clear_window();
+            }
             KeyCode::ArrowUp => {
                 //self.windows[self.focused_editor].move_cursor_up();
             }
@@ -460,23 +586,54 @@ impl SwimInterface {
     fn handle_unicode(&mut self, key: char) {
         match self.windows[self.focused_editor].state {
             WindowState::Editing => todo!(),
-            WindowState::Running => todo!(),
+            WindowState::Running => {
+                if self.windows[self.focused_editor].taking_input {
+                    if let Some(mut interpreter) = self.windows[self.focused_editor].interpreter {
+                        match key {
+                            '\n' => {
+                                self.windows[self.focused_editor].vruntime = self.min_vruntime().0;
+                                interpreter
+                                    .provide_input(
+                                        self.windows[self.focused_editor]
+                                            .input_buffer
+                                            .as_str()
+                                            .unwrap(),
+                                    )
+                                    .unwrap_or_else(|e| {
+                                        let mut err: ArrayString<80> = Default::default();
+                                        write!(err, "{}", e).unwrap();
+                                        self.windows[self.focused_editor]
+                                            .print(err.as_str().unwrap().as_bytes());
+                                    });
+                                self.windows[self.focused_editor].interpreter_print_loc += 1;
+                                self.windows[self.focused_editor].taking_input = false;
+                            }
+                            '\u{0008}' => self.windows[self.focused_editor].input_buffer.push_char('\u{0008}'),
+                            k => {
+                                if is_drawable(k) {
+                                    self.windows[self.focused_editor].input_buffer.push_char(k);
+                                }
+                            }
+                        }
+                        self.windows[self.focused_editor].interpreter = Some(interpreter);
+                    }
+                }
+            }
             WindowState::Listing => match key {
                 'r' => {
-                    for col in self.windows[self.focused_editor].window_x + 1..self.windows[self.focused_editor].window_x + WIN_WIDTH - 1 {
-                        for row in self.windows[self.focused_editor].window_y + 1..self.windows[self.focused_editor].window_y + 9 {
-                            plot(' ', col, row, ColorCode::new(Color::Black, Color::Black));
-                        }
-                    }
+                    self.windows[self.focused_editor].clear_window();
+                    self.windows[self.focused_editor].vruntime = self.min_vruntime().0;
                     self.windows[self.focused_editor].state = WindowState::Running;
                     let mut filesystem_operations = || -> Result<(), FileSystemError> {
                         let (_, files) = self.filesystem.list_directory()?;
                         let filename = files[self.windows[self.focused_editor].focused_file];
-                        let fd = self.filesystem.open_read(core::str::from_utf8(&filename).unwrap())?;
+                        let fd = self
+                            .filesystem
+                            .open_read(core::str::from_utf8(&filename).unwrap())?;
                         let mut buffer = [0; MAX_FILE_BYTES];
                         let num_bytes = self.filesystem.read(fd, &mut buffer)?;
                         let program = core::str::from_utf8(&buffer[0..num_bytes]).unwrap();
-                        self.windows[self.focused_editor].run_program(program);
+                        self.windows[self.focused_editor].run_program(program, filename);
                         self.filesystem.close(fd)?;
                         Ok(())
                     };
@@ -517,16 +674,19 @@ struct Window {
             STACK_DEPTH,
             MAX_LOCAL_VARS,
             WIN_WIDTH,
-            CopyingHeap<HEAP_SIZE, MAX_HEAP_BLOCKS>,
+            GenerationalHeap<HEAP_SIZE, MAX_HEAP_BLOCKS, 2>,
         >,
     >,
     interpreter_print_loc: usize,
+    current_file: [u8; 10],
     state: WindowState,
     window_x: usize,
     window_y: usize,
     focused: bool,
     focused_file: usize,
     vruntime: usize,
+    taking_input: bool,
+    input_buffer: ArrayString<10>,
 }
 
 impl Default for Window {
@@ -535,12 +695,15 @@ impl Default for Window {
             editor: None,
             interpreter: None,
             interpreter_print_loc: Default::default(),
+            current_file: Default::default(),
             state: Default::default(),
             window_x: Default::default(),
             window_y: Default::default(),
             focused: Default::default(),
             focused_file: Default::default(),
             vruntime: Default::default(),
+            taking_input: false,
+            input_buffer: Default::default(),
         }
     }
 }
@@ -550,13 +713,9 @@ impl Window {
         Self {
             editor: None,
             interpreter: None,
-            interpreter_print_loc: Default::default(),
-            state: Default::default(),
             window_x: x,
             window_y: y,
-            focused: Default::default(),
-            focused_file: Default::default(),
-            vruntime: Default::default(),
+            ..Default::default()
         }
     }
 
@@ -574,7 +733,24 @@ impl Window {
     ) {
         match self.state {
             WindowState::Editing => todo!(),
-            WindowState::Running => (),
+            WindowState::Running => {
+                if self.taking_input {
+                    plot_str(
+                        self.input_buffer.as_str().unwrap(),
+                        self.window_x + 1,
+                        self.window_y + 1 + self.interpreter_print_loc,
+                        ColorCode::new(Color::LightCyan, Color::Black),
+                    );
+                    for i in self.input_buffer.len()..10 {
+                        plot(
+                            ' ',
+                            self.window_x + 1 + i,
+                            self.window_y + 1 + self.interpreter_print_loc,
+                            ColorCode::new(Color::LightCyan, Color::Black),
+                        );
+                    }
+                }
+            }
             WindowState::Listing => match filesystem.list_directory() {
                 Ok((num_files, files)) => {
                     for i in 0..num_files {
@@ -612,27 +788,39 @@ impl Window {
         }
     }
 
-    pub fn run_program(&mut self, program: &str) {
+    pub fn run_program(&mut self, program: &str, filename: [u8; 10]) {
         let interpreter = Interpreter::new(program);
         self.interpreter = Some(interpreter);
+        self.current_file = filename;
+    }
+
+    pub fn clear_window(&mut self) {
+        for col in self.window_x + 1..self.window_x + WIN_WIDTH {
+            for row in self.window_y + 1..self.window_y + 11 {
+                plot(' ', col, row, ColorCode::new(Color::Black, Color::Black));
+            }
+        }
     }
 }
 
 impl InterpreterOutput for Window {
     fn print(&mut self, chars: &[u8]) {
-        // if let Some(mut buffer) =
-        // for i in 0..chars.len() {
-        //     i / WIN_WIDTH;
-        //     i % WIN_WIDTH;
-        //     if let Some(buffer) = self.interpreter_buffer {
-        //         buffer[self.interpreter_print_loc + i / WIN_WIDTH] = chars[i];
-        //     }
-        // }
-        for row in self.window_y + 1..self.interpreter_print_loc + self.window_y + 1 {
-            for col in self.window_x + 1..WIN_WIDTH + self.window_x - 1 {
-                let (c, color) = peek(col, row);
-                plot(c, col, row, color);
+        if self.interpreter_print_loc == 10 {
+            for row in self.window_y + 1..self.interpreter_print_loc + self.window_y {
+                for col in self.window_x + 1..WIN_WIDTH + self.window_x {
+                    let (c, color) = peek(col, row + 1);
+                    plot(c, col, row, color);
+                }
             }
+            for col in self.window_x + 1..WIN_WIDTH + self.window_x - 1 {
+                plot(
+                    ' ',
+                    col,
+                    self.interpreter_print_loc + self.window_y,
+                    ColorCode::new(Color::Black, Color::Black),
+                );
+            }
+            self.interpreter_print_loc -= 1;
         }
         if chars.len() > WIN_WIDTH - 2 {
             for i in 0..WIN_WIDTH - 2 {
@@ -644,8 +832,8 @@ impl InterpreterOutput for Window {
                 );
             }
             self.print(&chars[WIN_WIDTH - 2..]);
-        } else {
-            for i in 0..chars.len() {
+        } else if chars.len() != 0 {
+            for i in 0..chars.len() - 1 {
                 plot(
                     chars[i] as char,
                     i + self.window_x + 1,
@@ -654,8 +842,6 @@ impl InterpreterOutput for Window {
                 );
             }
         }
-        if self.interpreter_print_loc <= 8 {
-            self.interpreter_print_loc += 1;
-        }
+        self.interpreter_print_loc += 1;
     }
 }
