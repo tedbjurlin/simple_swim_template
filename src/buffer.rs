@@ -1,4 +1,5 @@
 use pluggable_interrupt_os::vga_buffer::{is_drawable, plot, Color, ColorCode};
+use simple_interp::ArrayString;
 
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub struct TextEditor<const LINE_WIDTH: usize, const DOCUMENT_LENGTH: usize> {
@@ -34,11 +35,29 @@ impl<const LINE_WIDTH: usize, const DOCUMENT_LENGTH: usize> Default
 impl<const LINE_WIDTH: usize, const DOCUMENT_LENGTH: usize>
     TextEditor<LINE_WIDTH, DOCUMENT_LENGTH>
 {
-    pub fn new(window_width: usize, window_height: usize, focused: bool) -> Self {
+    pub fn new(file_contents: &str, focused: bool) -> Self {
+        let file_bytes = file_contents.as_bytes();
+        let mut document = [[0u8 as char; LINE_WIDTH]; DOCUMENT_LENGTH];
+        let mut i = 0;
+        let mut row = 0;
+        let mut col = 0;
+        while i < file_bytes.len() && row < DOCUMENT_LENGTH {
+            if file_bytes[i] as char == '\n' {
+                i += 1;
+                row += 1;
+                col = 0;
+            } else if col > LINE_WIDTH {
+                row += 1;
+                col = 0;
+            }
+            document[row][col] = file_bytes[i] as char;
+            i += 1;
+            col += 1;
+        }
         Self {
-            window_size_x: window_width,
-            window_size_y: window_height,
-            document: [[0u8 as char; LINE_WIDTH]; DOCUMENT_LENGTH],
+            window_size_x: LINE_WIDTH,
+            window_size_y: DOCUMENT_LENGTH / 4,
+            document,
             cursor_col: 0,
             cursor_row: 0,
             target_col: 0,
@@ -46,6 +65,27 @@ impl<const LINE_WIDTH: usize, const DOCUMENT_LENGTH: usize>
             focus_y: 0,
             focused,
         }
+    }
+
+    pub fn get_file_contents(&self) -> ArrayString<1240> {
+        let mut ret = ArrayString::default();
+        let mut row = 0;
+        let mut col = 0;
+        while row < DOCUMENT_LENGTH {
+            if col > LINE_WIDTH {
+                col = 0;
+                row += 1;
+            }
+            if self.document[row][col] == 0 as char {
+                ret.push_char('\n');
+                col = 0;
+                row += 1;
+            } else {
+                ret.push_char(self.document[row][col]);
+                col += 1;
+            }
+        }
+        ret
     }
 
     pub fn push_char(&mut self, c: char) {
@@ -199,30 +239,30 @@ impl<const LINE_WIDTH: usize, const DOCUMENT_LENGTH: usize>
                     if is_drawable(self.document[y + self.focus_y][x]) {
                         plot(
                             self.document[y + self.focus_y][x],
-                            window_x + x + 1,
-                            window_y + y + 1,
+                            window_x + x,
+                            window_y + y,
                             ColorCode::new(Color::Black, Color::LightCyan),
                         );
                     } else {
                         plot(
                             ' ',
-                            window_x + x + 1,
-                            window_y + y + 1,
+                            window_x + x,
+                            window_y + y,
                             ColorCode::new(Color::Black, Color::LightCyan),
                         );
                     }
                 } else if is_drawable(self.document[y + self.focus_y][x]) {
                     plot(
                         self.document[y + self.focus_y][x],
-                        window_x + x + 1,
-                        window_y + y + 1,
+                        window_x + x,
+                        window_y + y,
                         ColorCode::new(Color::LightCyan, Color::Black),
                     );
                 } else {
                     plot(
                         ' ',
-                        window_x + x + 1,
-                        window_y + y + 1,
+                        window_x + x,
+                        window_y + y,
                         ColorCode::new(Color::LightCyan, Color::Black),
                     );
                 }

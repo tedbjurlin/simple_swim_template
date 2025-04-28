@@ -43,6 +43,7 @@ const MAX_LOCAL_VARS: usize = 10;
 const HEAP_SIZE: usize = 256;
 const MAX_HEAP_BLOCKS: usize = HEAP_SIZE;
 const SCHED_LATENCY: usize = 24;
+const LINE_WIDTH: usize = WIN_WIDTH - 2;
 
 pub struct SwimInterface {
     windows: [Window; 4],
@@ -189,8 +190,13 @@ impl SwimInterface {
             if let Some(mut interpreter) = self.windows[program_to_tick].interpreter {
                 //print!("{}", interpreter.completed);
                 match interpreter.tick(&mut self.windows[program_to_tick]) {
-                    simple_interp::TickStatus::Continuing => (),
-                    simple_interp::TickStatus::Finished => {}
+                    simple_interp::TickStatus::Continuing => {
+                        self.windows[program_to_tick].interpreter = Some(interpreter);
+                    },
+                    simple_interp::TickStatus::Finished => {
+                        self.windows[program_to_tick].print("[DONE] ".as_bytes());
+                        self.windows[program_to_tick].interpreter = None;
+                    }
                     simple_interp::TickStatus::AwaitInput => {
                         self.windows[program_to_tick].input_buffer = Default::default();
                         self.windows[program_to_tick].taking_input = true;
@@ -219,10 +225,10 @@ impl SwimInterface {
                             }
                             self.windows[program_to_tick].interpreter_print_loc -= 1;
                         }
+                        self.windows[program_to_tick].interpreter = Some(interpreter);
                     }
                 }
                 self.windows[program_to_tick].vruntime += 1;
-                self.windows[program_to_tick].interpreter = Some(interpreter);
             }
         }
     }
@@ -234,7 +240,7 @@ impl SwimInterface {
         for i in 0..4 {
             if self.windows[i].state == WindowState::Running {
                 if let Some(interpreter) = &self.windows[i].interpreter {
-                    if !interpreter.blocked_on_input() && !interpreter.completed() {
+                    if !interpreter.blocked_on_input() {
                         if self.windows[i].vruntime < min_vruntime {
                             min_vruntime = self.windows[i].vruntime;
                             program_to_tick = i;
@@ -298,6 +304,20 @@ impl SwimInterface {
                     0,
                     ColorCode::new(Color::LightCyan, Color::Black),
                 );
+                plot_str(
+                    self.filename_input.as_str().unwrap(),
+                    15,
+                    0,
+                    ColorCode::new(Color::LightCyan, Color::Black),
+                );
+                for i in self.filename_input.len()..MAX_FILENAME_BYTES {
+                    plot(
+                        ' ',
+                        15 + i,
+                        0,
+                        ColorCode::new(Color::LightCyan, Color::Black),
+                    );
+                }
             }
         }
         for i in 0..4 {
@@ -520,38 +540,93 @@ impl SwimInterface {
     fn handle_raw(&mut self, key: KeyCode) {
         match key {
             KeyCode::F1 => {
-                self.windows[self.focused_editor].set_focus(false);
-                self.focused_editor = 0;
-                self.windows[self.focused_editor].set_focus(true);
+                if !self.creating_file {
+                    self.windows[self.focused_editor].set_focus(false);
+                    self.focused_editor = 0;
+                    self.windows[self.focused_editor].set_focus(true);
+                }
             }
             KeyCode::F2 => {
-                self.windows[self.focused_editor].set_focus(false);
-                self.focused_editor = 1;
-                self.windows[self.focused_editor].set_focus(true);
+                if !self.creating_file {
+                    self.windows[self.focused_editor].set_focus(false);
+                    self.focused_editor = 1;
+                    self.windows[self.focused_editor].set_focus(true);
+                }
             }
             KeyCode::F3 => {
-                self.windows[self.focused_editor].set_focus(false);
-                self.focused_editor = 2;
-                self.windows[self.focused_editor].set_focus(true);
+                if !self.creating_file {
+                    self.windows[self.focused_editor].set_focus(false);
+                    self.focused_editor = 2;
+                    self.windows[self.focused_editor].set_focus(true);
+                }
             }
             KeyCode::F4 => {
-                self.windows[self.focused_editor].set_focus(false);
-                self.focused_editor = 3;
-                self.windows[self.focused_editor].set_focus(true);
+                if !self.creating_file {
+                    self.windows[self.focused_editor].set_focus(false);
+                    self.focused_editor = 3;
+                    self.windows[self.focused_editor].set_focus(true);
+                }
             }
-            KeyCode::F6 => {
-                self.windows[self.focused_editor].interpreter = None;
-                self.windows[self.focused_editor].interpreter_print_loc = 0;
-                self.windows[self.focused_editor].vruntime = 0;
-                self.windows[self.focused_editor].state = WindowState::Listing;
-                self.windows[self.focused_editor].clear_window();
-            }
+            KeyCode::F5 => match self.windows[self.focused_editor].state {
+                WindowState::Editing => {}
+                WindowState::Running => {}
+                WindowState::Listing => {
+                    if !self.creating_file {
+                        self.creating_file = true;
+                    }
+                }
+            },
+            KeyCode::F6 => match self.windows[self.focused_editor].state {
+                WindowState::Editing => {
+                    if let Some(mut editor) = self.windows[self.focused_editor].editor {
+                        let file = editor.get_file_contents();
+
+                        let mut filesystem_operations = || -> Result<(), FileSystemError> {
+                            let fd = self.filesystem.open_create(
+                                core::str::from_utf8(&self.windows[self.focused_editor].current_file).unwrap()
+                            )?;
+                            self.filesystem.write(fd, file.as_str().unwrap().as_bytes())?;
+                            self.filesystem.close(fd)?;
+                            Ok(())
+                        };
+                        filesystem_operations().unwrap_or_else(|e| {
+                            let mut err: ArrayString<80> = ArrayString::default();
+                            write!(err, "{}", e).unwrap();
+                            self.windows[self.focused_editor].print(err.as_str().unwrap().as_bytes());
+                        });
+                    }
+                    self.windows[self.focused_editor].clear_window();
+                    self.windows[self.focused_editor].editor = None;
+                    self.windows[self.focused_editor].state = WindowState::Listing;
+                }
+                WindowState::Running => {
+                    self.windows[self.focused_editor].interpreter = None;
+                    self.windows[self.focused_editor].interpreter_print_loc = 0;
+                    self.windows[self.focused_editor].vruntime = 0;
+                    self.windows[self.focused_editor].state = WindowState::Listing;
+                    self.windows[self.focused_editor].clear_window();
+                }
+                WindowState::Listing => {
+                    if self.creating_file {
+                        self.creating_file = false;
+                        self.filename_input = ArrayString::default();
+                    }
+                }
+            },
             KeyCode::ArrowUp => {
-                //self.windows[self.focused_editor].move_cursor_up();
+                if let Some(mut editor) = self.windows[self.focused_editor].editor {
+                    editor.move_cursor_up();
+                    self.windows[self.focused_editor].editor = Some(editor);
+                }
             }
             KeyCode::ArrowRight => {
                 match self.windows[self.focused_editor].state {
-                    WindowState::Editing => todo!(),
+                    WindowState::Editing => {
+                        if let Some(mut editor) = self.windows[self.focused_editor].editor {
+                            editor.move_cursor_right();
+                            self.windows[self.focused_editor].editor = Some(editor);
+                        }
+                    },
                     WindowState::Running => (),
                     WindowState::Listing => {
                         self.windows[self.focused_editor].focused_file =
@@ -562,11 +637,19 @@ impl SwimInterface {
                 //self.windows[self.focused_editor].move_cursor_right();
             }
             KeyCode::ArrowDown => {
-                //self.windows[self.focused_editor].move_cursor_down();
+                if let Some(mut editor) = self.windows[self.focused_editor].editor {
+                    editor.move_cursor_down();
+                    self.windows[self.focused_editor].editor = Some(editor);
+                }
             }
             KeyCode::ArrowLeft => {
                 match self.windows[self.focused_editor].state {
-                    WindowState::Editing => todo!(),
+                    WindowState::Editing => {
+                        if let Some(mut editor) = self.windows[self.focused_editor].editor {
+                            editor.move_cursor_left();
+                            self.windows[self.focused_editor].editor = Some(editor);
+                        }
+                    },
                     WindowState::Running => (),
                     WindowState::Listing => {
                         if self.num_files > 0 {
@@ -585,7 +668,21 @@ impl SwimInterface {
 
     fn handle_unicode(&mut self, key: char) {
         match self.windows[self.focused_editor].state {
-            WindowState::Editing => todo!(),
+            WindowState::Editing => {
+                if let Some(mut editor) = self.windows[self.focused_editor].editor {
+                    match key {
+                        '\n' => editor.newline(),
+                        '\u{0008}' => editor.backspace_char(),
+                        '\u{007F}' => editor.delete_char(),
+                        k => {
+                            if is_drawable(k) {
+                                editor.push_char(key);
+                            }
+                        }
+                    }
+                    self.windows[self.focused_editor].editor = Some(editor);
+                }
+            },
             WindowState::Running => {
                 if self.windows[self.focused_editor].taking_input {
                     if let Some(mut interpreter) = self.windows[self.focused_editor].interpreter {
@@ -608,7 +705,9 @@ impl SwimInterface {
                                 self.windows[self.focused_editor].interpreter_print_loc += 1;
                                 self.windows[self.focused_editor].taking_input = false;
                             }
-                            '\u{0008}' => self.windows[self.focused_editor].input_buffer.push_char('\u{0008}'),
+                            '\u{0008}' => self.windows[self.focused_editor]
+                                .input_buffer
+                                .push_char('\u{0008}'),
                             k => {
                                 if is_drawable(k) {
                                     self.windows[self.focused_editor].input_buffer.push_char(k);
@@ -619,30 +718,89 @@ impl SwimInterface {
                     }
                 }
             }
-            WindowState::Listing => match key {
-                'r' => {
-                    self.windows[self.focused_editor].clear_window();
-                    self.windows[self.focused_editor].vruntime = self.min_vruntime().0;
-                    self.windows[self.focused_editor].state = WindowState::Running;
-                    let mut filesystem_operations = || -> Result<(), FileSystemError> {
-                        let (_, files) = self.filesystem.list_directory()?;
-                        let filename = files[self.windows[self.focused_editor].focused_file];
-                        let fd = self
-                            .filesystem
-                            .open_read(core::str::from_utf8(&filename).unwrap())?;
-                        let mut buffer = [0; MAX_FILE_BYTES];
-                        let num_bytes = self.filesystem.read(fd, &mut buffer)?;
-                        let program = core::str::from_utf8(&buffer[0..num_bytes]).unwrap();
-                        self.windows[self.focused_editor].run_program(program, filename);
-                        self.filesystem.close(fd)?;
-                        Ok(())
-                    };
-                    if let Err(_e) = filesystem_operations() {
-                        self.windows[self.focused_editor].print("filesystem error".as_bytes());
+            WindowState::Listing => {
+                if !self.creating_file {
+                    match key {
+                        'e' => {
+                            self.windows[self.focused_editor].clear_window();
+                            self.windows[self.focused_editor].state = WindowState::Editing;
+                            let mut filesystem_operations = || -> Result<(), FileSystemError> {
+                                let (_, files) = self.filesystem.list_directory()?;
+                                let filename =
+                                    files[self.windows[self.focused_editor].focused_file];
+                                let fd = self
+                                    .filesystem
+                                    .open_read(core::str::from_utf8(&filename).unwrap())?;
+                                let mut buffer = [0; MAX_FILE_BYTES];
+                                let num_bytes = self.filesystem.read(fd, &mut buffer)?;
+                                let file = core::str::from_utf8(&buffer[0..num_bytes]).unwrap();
+                                self.windows[self.focused_editor].edit_file(file, filename);
+                                self.filesystem.close(fd).unwrap();
+                                Ok(())
+                            };
+                            if let Err(e) = filesystem_operations() {
+                                let mut err: ArrayString<80> = ArrayString::default();
+                                write!(err, "{}", e).unwrap();
+                                self.windows[self.focused_editor].print(err.as_str().unwrap().as_bytes());
+                            }
+                        }
+                        'r' => {
+                            self.windows[self.focused_editor].clear_window();
+                            self.windows[self.focused_editor].vruntime = self.min_vruntime().0;
+                            self.windows[self.focused_editor].state = WindowState::Running;
+                            let mut filesystem_operations = || -> Result<(), FileSystemError> {
+                                let (_, files) = self.filesystem.list_directory()?;
+                                let filename =
+                                    files[self.windows[self.focused_editor].focused_file];
+                                let fd = self
+                                    .filesystem
+                                    .open_read(core::str::from_utf8(&filename).unwrap())?;
+                                let mut buffer = [0; MAX_FILE_BYTES];
+                                let num_bytes = self.filesystem.read(fd, &mut buffer)?;
+                                let program = core::str::from_utf8(&buffer[0..num_bytes]).unwrap();
+                                self.windows[self.focused_editor].run_program(program, filename);
+                                self.filesystem.close(fd)?;
+                                Ok(())
+                            };
+                            if let Err(e) = filesystem_operations() {
+                                let mut err: ArrayString<80> = ArrayString::default();
+                                write!(err, "{}", e).unwrap();
+                                self.windows[self.focused_editor].print(err.as_str().unwrap().as_bytes());
+                            }
+                        }
+                        _ => (),
+                    }
+                } else {
+                    match key {
+                        '\n' => {
+                            let mut filesystem_operations = || -> Result<(), FileSystemError> {
+                                let fd = self.filesystem.open_create(self.filename_input.as_str().unwrap())?;
+                                self.filesystem.close(fd)?;
+                                self.num_files = self.filesystem.list_directory()?.0;
+                                Ok(())
+                            };
+                            match filesystem_operations() {
+                                Ok(()) => {
+                                    self.creating_file = false;
+                                    self.filename_input = ArrayString::default();
+                                },
+                                Err(e) => {
+                                    let mut err: ArrayString<80> = ArrayString::default();
+                                    write!(err, "{}", e).unwrap();
+                                    self.windows[self.focused_editor].print(err.as_str().unwrap().as_bytes());
+                                },
+                            }
+
+                        }
+                        '\u{0008}' => self.filename_input.push_char('\u{0008}'),
+                        k => {
+                            if is_drawable(k) {
+                                self.filename_input.push_char(k);
+                            }
+                        }
                     }
                 }
-                _ => (),
-            },
+            }
         }
         // match key {
         //     '\n' => self.windows[self.focused_editor].newline(),
@@ -666,7 +824,7 @@ enum WindowState {
 }
 
 struct Window {
-    editor: Option<TextEditor<WIN_WIDTH, DOCUMENT_LENGTH>>,
+    editor: Option<TextEditor<LINE_WIDTH, DOCUMENT_LENGTH>>,
     interpreter: Option<
         Interpreter<
             MAX_TOKENS,
@@ -732,7 +890,12 @@ impl Window {
         >,
     ) {
         match self.state {
-            WindowState::Editing => todo!(),
+            WindowState::Editing => {
+                if let Some(mut editor) = self.editor {
+                    editor.draw_window(self.window_x + 1, self.window_y + 1);
+                    self.editor = Some(editor);
+                }
+            },
             WindowState::Running => {
                 if self.taking_input {
                     plot_str(
@@ -774,7 +937,9 @@ impl Window {
                     }
                 }
                 Err(e) => {
-                    todo!()
+                    let mut err: ArrayString<80> = ArrayString::default();
+                    write!(err, "{}", e).unwrap();
+                    self.print(err.as_str().unwrap().as_bytes());
                 }
             },
         }
@@ -791,6 +956,12 @@ impl Window {
     pub fn run_program(&mut self, program: &str, filename: [u8; 10]) {
         let interpreter = Interpreter::new(program);
         self.interpreter = Some(interpreter);
+        self.current_file = filename;
+    }
+
+    pub fn edit_file(&mut self, file: &str, filename: [u8; 10]) {
+        let editor = TextEditor::new(file, true);
+        self.editor = Some(editor);
         self.current_file = filename;
     }
 
