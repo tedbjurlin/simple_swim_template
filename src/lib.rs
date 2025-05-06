@@ -3,15 +3,12 @@
 use buffer::TextEditor;
 use core::{fmt::Write, usize};
 use file_system_solution::{FileSystem, FileSystemError};
-use gc_heap_template::{CopyingHeap, GenerationalHeap, OnceAndDoneHeap};
+use gc_heap_template::GenerationalHeap;
 use num::Integer;
 use pc_keyboard::{DecodedKey, KeyCode};
-use pluggable_interrupt_os::{
-    print, println,
-    vga_buffer::{
+use pluggable_interrupt_os::vga_buffer::{
         is_drawable, peek, plot, plot_num, plot_num_right_justified, plot_str, Color, ColorCode,
-    },
-};
+    };
 use ramdisk::RamDisk;
 use simple_interp::{ArrayString, Interpreter, InterpreterOutput};
 
@@ -77,8 +74,7 @@ print(257)
         );
         create_default(
             "average",
-            r#"
-sum := 0
+            r#"sum := 0
 count := 0
 averaging := true
 while averaging {
@@ -96,8 +92,7 @@ print((sum / count))
         );
         create_default(
             "pi",
-            r#"
-sum := 0
+            r#"sum := 0
 i := 0
 neg := false
 terms := input("Num terms:")
@@ -578,7 +573,7 @@ impl SwimInterface {
             },
             KeyCode::F6 => match self.windows[self.focused_editor].state {
                 WindowState::Editing => {
-                    if let Some(mut editor) = self.windows[self.focused_editor].editor {
+                    if let Some(editor) = self.windows[self.focused_editor].editor {
                         let file = editor.get_file_contents();
 
                         let mut filesystem_operations = || -> Result<(), FileSystemError> {

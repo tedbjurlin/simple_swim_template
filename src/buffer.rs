@@ -46,7 +46,7 @@ impl<const LINE_WIDTH: usize, const DOCUMENT_LENGTH: usize>
                 i += 1;
                 row += 1;
                 col = 0;
-            } else if col > LINE_WIDTH {
+            } else if col >= LINE_WIDTH {
                 row += 1;
                 col = 0;
             }
@@ -72,7 +72,7 @@ impl<const LINE_WIDTH: usize, const DOCUMENT_LENGTH: usize>
         let mut row = 0;
         let mut col = 0;
         while row < DOCUMENT_LENGTH {
-            if col > LINE_WIDTH {
+            if col >= LINE_WIDTH {
                 col = 0;
                 row += 1;
             }
